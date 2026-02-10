@@ -1,0 +1,94 @@
+{
+  "_format": "hh3-artifact-1",
+  "contractName": "OwnershipFacet",
+  "sourceName": "contracts/facets/OwnershipFacet.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "owner",
+          "type": "address"
+        }
+      ],
+      "name": "NotContractOwner",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousOwner",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "OwnershipTransferred",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousOwner",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "OwnershipTransferred",
+      "type": "event"
+    },
+    {
+      "inputs": [],
+      "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "owner_",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "_newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "transferOwnership",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x6080604052348015600e575f5ffd5b5061023d8061001c5f395ff3fe608060405234801561000f575f5ffd5b5060043610610034575f3560e01c80638da5cb5b14610038578063f2fde38b1461005c575b5f5ffd5b610040610071565b6040516001600160a01b03909116815260200160405180910390f35b61006f61006a3660046101da565b6100a8565b005b5f6100a37fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f546001600160a01b031690565b905090565b6100b06100bc565b6100b981610146565b50565b7fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131c600301546001600160a01b03163314610144577fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f5460408051600162bed83560e01b031981523360048201526001600160a01b039092166024830152519081900360440190fd5b565b7fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f80546001600160a01b031981166001600160a01b038481169182179093556040517fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131c939092169182907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0905f90a3505050565b5f602082840312156101ea575f5ffd5b81356001600160a01b0381168114610200575f5ffd5b939250505056fea264697066735822122086f8213cbcc4c90f7a8fcef72b822f615aa81fffb2a109a28328aab73231310f64736f6c634300081e0033",
+  "deployedBytecode": "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c80638da5cb5b14610038578063f2fde38b1461005c575b5f5ffd5b610040610071565b6040516001600160a01b03909116815260200160405180910390f35b61006f61006a3660046101da565b6100a8565b005b5f6100a37fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f546001600160a01b031690565b905090565b6100b06100bc565b6100b981610146565b50565b7fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131c600301546001600160a01b03163314610144577fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f5460408051600162bed83560e01b031981523360048201526001600160a01b039092166024830152519081900360440190fd5b565b7fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131f80546001600160a01b031981166001600160a01b038481169182179093556040517fc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131c939092169182907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0905f90a3505050565b5f602082840312156101ea575f5ffd5b81356001600160a01b0381168114610200575f5ffd5b939250505056fea264697066735822122086f8213cbcc4c90f7a8fcef72b822f615aa81fffb2a109a28328aab73231310f64736f6c634300081e0033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "immutableReferences": {},
+  "inputSourceName": "project/contracts/facets/OwnershipFacet.sol",
+  "buildInfoId": "solc-0_8_30-22e083d90b7bef4dd59ae64dfbe8b1832580ec55"
+}

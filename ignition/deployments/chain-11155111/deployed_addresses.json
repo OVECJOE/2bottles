@@ -1,0 +1,13 @@
+{
+  "DiamondModule#BTLTokenFacet": "0xFFE58c5B40CaD416C2855327296b7399CE1c5732",
+  "DiamondModule#DiamondCutFacet": "0x61Bd0DCFb450962C6c4fbaB44383f1CEc7FA499E",
+  "DiamondModule#DiamondInit": "0x8D6B9f11E82C212040c6E9b2fdD688D8c4214fAe",
+  "DiamondModule#DiamondLoupeFacet": "0x4AeEAea1389A4CF720296B1507AA9ac48A25f72d",
+  "DiamondModule#GovernanceFacet": "0xD433848cE2E9F2F9e355B38eDA3C4D2e096E98ce",
+  "DiamondModule#OwnershipFacet": "0xda449d0c463fef720Bd5E965e56DE4d6B547A464",
+  "DiamondModule#ProofTokenFacet": "0x922853676b5C8E619181fC57Aa751d08CF5c8aE9",
+  "DiamondModule#RewardsFacet": "0x1B056e2553615A8d53ae3442a4912542ccF05113",
+  "DiamondModule#StakingFacet": "0x54DEc9B1E2f1D4A861C3b4643bA4B66d7a874415",
+  "DiamondModule#TreasuryFacet": "0xed9426339077a183CE1c3F5fD19dc4129e9871F3",
+  "DiamondModule#Diamond": "0x4DEd73D93116A7c64c02CA68AAa84205483180Bb"
+}
