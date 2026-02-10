@@ -1,7 +1,7 @@
 // test/Diamond.test.ts
 import { expect } from "chai";
 import hre from "hardhat";
-import { Contract, Signer } from "ethers";
+import { BaseContract, Signer } from "ethers";
 import { HardhatEthers } from "@nomicfoundation/hardhat-ethers/types";
 import {
     BTLTokenFacet,
@@ -18,14 +18,14 @@ import {
 } from "../types/ethers-contracts/index.js";
 
 // Helper function to get selectors from a contract
-function getSelectors(contract: any): string[] {
-    const signatures = Object.keys(contract.interface.functions);
-    return signatures.reduce((acc: string[], signature) => {
-        if (signature !== "init(tuple)") {
-            acc.push(contract.interface.getSighash(signature));
+function getSelectors(contract: BaseContract): string[] {
+    const selectors: string[] = [];
+    contract.interface.forEachFunction((func) => {
+        if (func.name !== "init") {
+            selectors.push(func.selector);
         }
-        return acc;
-    }, []);
+    });
+    return selectors;
 }
 
 const FacetCutAction = { Add: 0, Replace: 1, Remove: 2 };
@@ -461,7 +461,7 @@ describe("2bottles Diamond", async function () {
             // Transfers should work again
             await expect(
                 asBTL().connect(owner).btlTransfer(await user1.getAddress(), ethers.parseEther("100"))
-            ).to.not.be.reverted;
+            ).to.not.be.revert(ethers);
         });
     });
 });
