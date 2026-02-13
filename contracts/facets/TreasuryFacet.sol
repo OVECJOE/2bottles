@@ -2,174 +2,210 @@
 pragma solidity ^0.8.30;
 
 import "../libraries/LibAppStorage.sol";
+import "../libraries/LibReentrancyGuard.sol";
+import "../libraries/LibSafeERC20.sol";
+import "../libraries/LibVotes.sol";
+import "../interfaces/IERC20.sol";
+import "../interfaces/ISwapRouter.sol";
 
 /**
  * @title TreasuryFacet
- * @notice Manages the protocol treasury and collateralization
- * @dev The treasury is the heart of the PROOF stability mechanism
- *      
- *      TREASURY HOLDINGS:
- *      - USDC (primary stablecoin)
- *      - DAI (diversification)
- *      - Protocol fees from transactions
- *      
- *      CRITICAL FUNCTIONS:
- *      1. Maintain collateralization ratio (min 125%, target 150%)
- *      2. Allow PROOF redemption for USDC
- *      3. Accept deposits from various sources
- *      4. Buyback 2BTL with excess reserves
+ * @notice Treasury management for the 2bottles protocol
+ * @dev Manages USDC and DAI reserves that collateralize the PROOF token.
+ *      All deposits and withdrawals execute real ERC20 transfers via LibSafeERC20.
+ *
+ *      KEY MECHANISMS:
+ *      - Deposits require TREASURY_MANAGER or ADMIN authorization
+ *      - Withdrawals enforce minimum collateralization ratios
+ *      - Cross-decimal normalization: USDC (6 decimals) and DAI (18 decimals)
+ *      - Buybacks route through a configurable DEX router and burn purchased 2BTL
+ *      - Admin self-revoke protection prevents accidental lockout
+ *
+ *      DEPLOYMENT NOTE: The Diamond owner should be a multisig or timelock contract.
  */
 contract TreasuryFacet {
-    
+
     // ============ Events ============
     event TreasuryDeposit(address indexed token, uint256 amount, address indexed from);
     event TreasuryWithdrawal(address indexed token, uint256 amount, address indexed to);
     event CollateralRatioUpdated(uint256 newMinRatio, uint256 newTargetRatio);
-    event BuybackExecuted(uint256 usdcSpent, uint256 btlBought);
+    event BuybackExecuted(uint256 usdcSpent, uint256 btlBurned);
     event EmergencyWithdraw(address indexed token, uint256 amount, address indexed to);
+    event DexRouterUpdated(address indexed newRouter);
 
-    // ============ Deposit Functions ============
+    // ============ Modifiers ============
+    modifier nonReentrant() {
+        LibReentrancyGuard.nonReentrantBefore();
+        _;
+        LibReentrancyGuard.nonReentrantAfter();
+    }
+
+    // ============ Deposit Functions (Real ERC20 Transfers) ============
 
     /**
-     * @notice Deposit USDC into treasury
+     * @notice Deposit USDC into the treasury
+     * @dev Caller must have approved the Diamond contract to spend their USDC.
+     *      Restricted to TREASURY_MANAGER and ADMIN roles.
+     * @param amount Amount of USDC to deposit (6 decimals)
      */
-    function depositUSDC(uint256 amount) external {
+    function depositUSDC(uint256 amount) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.enforceNotPaused();
         require(amount > 0, "Treasury: Cannot deposit zero");
-        
-        // Note: In production, transfer USDC from msg.sender
-        // IERC20(s.usdcAddress).transferFrom(msg.sender, address(this), amount)
-        
+        require(s.usdcAddress != address(0), "Treasury: USDC not configured");
+        require(
+            s.roles[LibAppStorage.TREASURY_MANAGER_ROLE][msg.sender] ||
+            s.roles[LibAppStorage.ADMIN_ROLE][msg.sender],
+            "Treasury: Not authorized to deposit"
+        );
+
+        // Real ERC20 transfer
+        LibSafeERC20.safeTransferFrom(IERC20(s.usdcAddress), msg.sender, address(this), amount);
         s.treasuryUSDC += amount;
-        
+
         emit TreasuryDeposit(s.usdcAddress, amount, msg.sender);
     }
 
     /**
-     * @notice Deposit DAI into treasury
+     * @notice Deposit DAI into the treasury
+     * @dev Caller must have approved the Diamond contract to spend their DAI.
+     *      Restricted to TREASURY_MANAGER and ADMIN roles.
+     * @param amount Amount of DAI to deposit (18 decimals)
      */
-    function depositDAI(uint256 amount) external {
+    function depositDAI(uint256 amount) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         LibAppStorage.enforceNotPaused();
         require(amount > 0, "Treasury: Cannot deposit zero");
-        
+        require(s.daiAddress != address(0), "Treasury: DAI not configured");
+        require(
+            s.roles[LibAppStorage.TREASURY_MANAGER_ROLE][msg.sender] ||
+            s.roles[LibAppStorage.ADMIN_ROLE][msg.sender],
+            "Treasury: Not authorized to deposit"
+        );
+
+        LibSafeERC20.safeTransferFrom(IERC20(s.daiAddress), msg.sender, address(this), amount);
         s.treasuryDAI += amount;
-        
+
         emit TreasuryDeposit(s.daiAddress, amount, msg.sender);
     }
 
-    // ============ Withdrawal Functions ============
+    // ============ Withdrawal Functions (Real ERC20 Transfers) ============
 
-    /**
-     * @notice Withdraw USDC from treasury (maintains collateral ratio)
-     */
-    function withdrawUSDC(uint256 amount, address to) external {
+    function withdrawUSDC(uint256 amount, address to) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         require(s.roles[LibAppStorage.TREASURY_MANAGER_ROLE][msg.sender], "Treasury: Not authorized");
         LibAppStorage.enforceNotPaused();
-        require(amount > 0, "Treasury: Cannot withdraw zero");
-        require(to != address(0), "Treasury: Invalid recipient");
+        require(amount > 0 && to != address(0), "Treasury: Invalid params");
         require(s.treasuryUSDC >= amount, "Treasury: Insufficient USDC");
-        
-        // Check collateralization after withdrawal
-        uint256 newUSDC = s.treasuryUSDC - amount;
-        uint256 totalCollateral = newUSDC + s.treasuryDAI;
+
+        // Check collateral after withdrawal (normalized)
+        uint256 newNormalized = (s.treasuryUSDC - amount) + (s.treasuryDAI / LibAppStorage.DECIMAL_NORMALIZATION);
         uint256 requiredCollateral = (s.proofTotalSupply * s.minCollateralRatio) / LibAppStorage.BASIS_POINTS;
-        
-        require(totalCollateral >= requiredCollateral, "Treasury: Would break collateral ratio");
-        
-        s.treasuryUSDC = newUSDC;
-        
+        require(newNormalized >= requiredCollateral, "Treasury: Would break collateral ratio");
+
+        // Effects
+        s.treasuryUSDC -= amount;
+
+        // Interaction
+        LibSafeERC20.safeTransfer(IERC20(s.usdcAddress), to, amount);
+
         emit TreasuryWithdrawal(s.usdcAddress, amount, to);
     }
 
-    /**
-     * @notice Withdraw DAI from treasury (maintains collateral ratio)
-     */
-    function withdrawDAI(uint256 amount, address to) external {
+    function withdrawDAI(uint256 amount, address to) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         require(s.roles[LibAppStorage.TREASURY_MANAGER_ROLE][msg.sender], "Treasury: Not authorized");
         LibAppStorage.enforceNotPaused();
-        require(amount > 0, "Treasury: Cannot withdraw zero");
-        require(to != address(0), "Treasury: Invalid recipient");
+        require(amount > 0 && to != address(0), "Treasury: Invalid params");
         require(s.treasuryDAI >= amount, "Treasury: Insufficient DAI");
-        
-        // Check collateralization after withdrawal
-        uint256 newDAI = s.treasuryDAI - amount;
-        uint256 totalCollateral = s.treasuryUSDC + newDAI;
+
+        uint256 newNormalized = s.treasuryUSDC + ((s.treasuryDAI - amount) / LibAppStorage.DECIMAL_NORMALIZATION);
         uint256 requiredCollateral = (s.proofTotalSupply * s.minCollateralRatio) / LibAppStorage.BASIS_POINTS;
-        
-        require(totalCollateral >= requiredCollateral, "Treasury: Would break collateral ratio");
-        
-        s.treasuryDAI = newDAI;
-        
+        require(newNormalized >= requiredCollateral, "Treasury: Would break collateral ratio");
+
+        s.treasuryDAI -= amount;
+        LibSafeERC20.safeTransfer(IERC20(s.daiAddress), to, amount);
+
         emit TreasuryWithdrawal(s.daiAddress, amount, to);
     }
 
-    // ============ Buyback Functions ============
+    // ============ Buyback (via DEX Router) ============
 
     /**
-     * @notice Execute 2BTL buyback with excess reserves
+     * @notice Buy and burn 2BTL using excess USDC reserves via DEX
+     * @param usdcAmount Amount of USDC to spend on buyback
+     * @param minBtlOut Minimum BTL to receive (slippage protection)
      */
-    function executeBuyback(uint256 usdcAmount) external {
+    function executeBuyback(uint256 usdcAmount, uint256 minBtlOut) external nonReentrant {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         require(s.roles[LibAppStorage.TREASURY_MANAGER_ROLE][msg.sender], "Treasury: Not authorized");
         LibAppStorage.enforceNotPaused();
         require(usdcAmount > 0, "Treasury: Cannot buyback zero");
-        
-        // Check we're overcollateralized
+        require(s.dexRouter != address(0), "Treasury: DEX router not configured");
+        require(s.usdcAddress != address(0), "Treasury: USDC not configured");
+
+        // Ensure overcollateralized
         uint256 currentRatio = _getCollateralizationRatio();
         require(currentRatio > s.targetCollateralRatio, "Treasury: Not overcollateralized");
-        
-        // Calculate how much we can safely spend
-        uint256 totalCollateral = s.treasuryUSDC + s.treasuryDAI;
+
+        // Only spend excess collateral
+        uint256 totalCollateral = LibAppStorage.normalizedTreasuryTotal();
         uint256 targetCollateral = (s.proofTotalSupply * s.targetCollateralRatio) / LibAppStorage.BASIS_POINTS;
         uint256 excessCollateral = totalCollateral > targetCollateral ? totalCollateral - targetCollateral : 0;
-        
         require(usdcAmount <= excessCollateral, "Treasury: Amount exceeds excess collateral");
         require(usdcAmount <= s.treasuryUSDC, "Treasury: Insufficient USDC");
-        
+
+        // Effects
         s.treasuryUSDC -= usdcAmount;
-        
-        // Simulate buying 2BTL (in production: use DEX)
-        // Assume price of 1 2BTL = $0.05
-        uint256 btlBought = (usdcAmount * 1e18) / (5 * 1e16);
-        
-        // Burn the bought 2BTL (deflationary)
-        if (btlBought > 0 && s.btlTotalSupply >= btlBought) {
+
+        // Approve DEX router to spend USDC
+        LibSafeERC20.safeApprove(IERC20(s.usdcAddress), s.dexRouter, usdcAmount);
+
+        // Swap USDC for BTL via DEX
+        address btlAddress = s.btlWrapper != address(0) ? s.btlWrapper : address(this);
+        address[] memory path = new address[](2);
+        path[0] = s.usdcAddress;
+        path[1] = btlAddress;
+
+        uint256[] memory amounts = ISwapRouter(s.dexRouter).swapExactTokensForTokens(
+            usdcAmount,
+            minBtlOut,
+            path,
+            address(this),
+            block.timestamp
+        );
+
+        uint256 btlBought = amounts[amounts.length - 1];
+
+        // Burn the purchased BTL from contract balance
+        require(s.btlBalances[address(this)] >= btlBought, "Treasury: Insufficient BTL after swap");
+        unchecked {
+            s.btlBalances[address(this)] -= btlBought;
             s.btlTotalSupply -= btlBought;
         }
-        
+
+        LibVotes.transferVotingUnits(address(this), address(0), btlBought);
+
         emit BuybackExecuted(usdcAmount, btlBought);
     }
 
     // ============ View Functions ============
 
-    /**
-     * @notice Get treasury balances
-     */
     function getTreasuryBalances() external view returns (
         uint256 usdcBalance,
         uint256 daiBalance,
-        uint256 totalValue
+        uint256 totalValueNormalized
     ) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         usdcBalance = s.treasuryUSDC;
         daiBalance = s.treasuryDAI;
-        totalValue = usdcBalance + daiBalance;
+        totalValueNormalized = LibAppStorage.normalizedTreasuryTotal();
     }
 
-    /**
-     * @notice Get current collateralization ratio
-     */
     function getCollateralizationRatio() external view returns (uint256) {
         return _getCollateralizationRatio();
     }
 
-    /**
-     * @notice Get collateralization health status
-     */
     function getCollateralizationHealth() external view returns (
         bool isHealthy,
         uint256 currentRatio,
@@ -183,119 +219,113 @@ contract TreasuryFacet {
         isHealthy = currentRatio >= minRatio;
     }
 
-    /**
-     * @notice Calculate excess collateral available for buyback
-     */
-    function getExcessCollateral() external view returns (uint256 excessUSDC) {
+    function getExcessCollateral() external view returns (uint256) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        
         uint256 currentRatio = _getCollateralizationRatio();
-        if (currentRatio <= s.targetCollateralRatio) {
-            return 0;
-        }
-        
-        uint256 totalCollateral = s.treasuryUSDC + s.treasuryDAI;
+        if (currentRatio <= s.targetCollateralRatio) return 0;
+
+        uint256 totalCollateral = LibAppStorage.normalizedTreasuryTotal();
         uint256 targetCollateral = (s.proofTotalSupply * s.targetCollateralRatio) / LibAppStorage.BASIS_POINTS;
-        
         return totalCollateral > targetCollateral ? totalCollateral - targetCollateral : 0;
     }
 
     // ============ Admin Functions ============
 
-    /**
-     * @notice Set collateralization ratios
-     */
     function setCollateralRatios(uint256 newMinRatio, uint256 newTargetRatio) external {
         LibAppStorage.enforceIsAdmin();
         require(newMinRatio >= 10000, "Treasury: Min ratio must be >= 100%");
         require(newTargetRatio >= newMinRatio, "Treasury: Target must be >= min");
         require(newTargetRatio <= 30000, "Treasury: Target ratio too high");
-        
+
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.minCollateralRatio = newMinRatio;
         s.targetCollateralRatio = newTargetRatio;
-        
+
         emit CollateralRatioUpdated(newMinRatio, newTargetRatio);
     }
 
-    /**
-     * @notice Set stablecoin addresses
-     */
     function setStablecoinAddresses(address usdcAddress, address daiAddress) external {
         LibAppStorage.enforceIsAdmin();
         require(usdcAddress != address(0), "Treasury: Invalid USDC address");
         require(daiAddress != address(0), "Treasury: Invalid DAI address");
-        
+
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
         s.usdcAddress = usdcAddress;
         s.daiAddress = daiAddress;
     }
 
+    function setDexRouter(address router) external {
+        LibAppStorage.enforceIsAdmin();
+        require(router != address(0), "Treasury: Invalid router address");
+        LibAppStorage.appStorage().dexRouter = router;
+        emit DexRouterUpdated(router);
+    }
+
     /**
-     * @notice Emergency withdraw (bypasses collateral checks - use with caution!)
+     * @notice Emergency withdrawal that bypasses collateral ratio checks
+     * @dev Restricted to ADMIN. Intended for incident response only.
+     *      Should be behind a timelock or multisig in production.
+     * @param token Address of the ERC20 token to withdraw
+     * @param amount Amount to withdraw
+     * @param to Recipient address
      */
-    function emergencyWithdraw(address token, uint256 amount, address to) external {
+    function emergencyWithdraw(address token, uint256 amount, address to) external nonReentrant {
         LibAppStorage.enforceIsAdmin();
         require(to != address(0), "Treasury: Invalid recipient");
-        
+
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        
+
         if (token == s.usdcAddress) {
             require(s.treasuryUSDC >= amount, "Treasury: Insufficient USDC");
             s.treasuryUSDC -= amount;
         } else if (token == s.daiAddress) {
             require(s.treasuryDAI >= amount, "Treasury: Insufficient DAI");
             s.treasuryDAI -= amount;
-        } else {
-            revert("Treasury: Unsupported token");
         }
-        
+        // For untracked tokens (accidentally sent), just transfer without bookkeeping
+
+        LibSafeERC20.safeTransfer(IERC20(token), to, amount);
+
         emit EmergencyWithdraw(token, amount, to);
     }
 
-    /**
-     * @notice Set global pause state
-     */
-    function setPaused(bool paused) external {
+    function setPaused(bool _paused) external {
         LibAppStorage.enforceIsAdmin();
-        LibAppStorage.appStorage().paused = paused;
+        LibAppStorage.appStorage().paused = _paused;
     }
 
-    // ============ Role Management ============
+    // ============ Role Management (with admin self-revoke protection) ============
 
-    /**
-     * @notice Grant a role to an address
-     */
     function grantRole(bytes32 role, address account) external {
         LibAppStorage.enforceIsAdmin();
         LibAppStorage.grantRole(role, account);
     }
 
     /**
-     * @notice Revoke a role from an address
+     * @notice Revoke a role from an account
+     * @dev Prevents the caller from revoking their own ADMIN_ROLE to avoid lockout.
+     * @param role The role identifier to revoke
+     * @param account The address to revoke the role from
      */
     function revokeRole(bytes32 role, address account) external {
         LibAppStorage.enforceIsAdmin();
+        require(
+            !(role == LibAppStorage.ADMIN_ROLE && account == msg.sender),
+            "Treasury: Cannot revoke own admin role"
+        );
         LibAppStorage.revokeRole(role, account);
     }
 
-    /**
-     * @notice Check if an address has a role
-     */
     function hasRole(bytes32 role, address account) external view returns (bool) {
         return LibAppStorage.hasRole(role, account);
     }
 
-    // ============ Internal Functions ============
+    // ============ Internal ============
 
     function _getCollateralizationRatio() internal view returns (uint256) {
         LibAppStorage.AppStorage storage s = LibAppStorage.appStorage();
-        
-        if (s.proofTotalSupply == 0) {
-            return type(uint256).max;
-        }
-        
-        uint256 totalCollateral = s.treasuryUSDC + s.treasuryDAI;
+        if (s.proofTotalSupply == 0) return type(uint256).max;
+        uint256 totalCollateral = LibAppStorage.normalizedTreasuryTotal();
         return (totalCollateral * LibAppStorage.BASIS_POINTS) / s.proofTotalSupply;
     }
 }

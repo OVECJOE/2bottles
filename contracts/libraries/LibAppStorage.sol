@@ -3,24 +3,26 @@ pragma solidity ^0.8.30;
 
 /**
  * @title LibAppStorage
- * @notice Defines the shared storage structure for all 2bottles facets
- * @dev Uses the "AppStorage" pattern where all app data lives in one struct
- *      This struct is stored at a specific storage slot to avoid collisions
- *      
- *      WHY THIS PATTERN?
- *      - All facets can access the same data
- *      - No storage collisions between facets
- *      - Easy to see all state in one place
- *      - More gas efficient than multiple storage reads
+ * @notice Shared storage layout for all 2bottles Diamond facets
+ * @dev Implements the AppStorage pattern (EIP-2535 recommended) where all
+ *      application state lives in a single struct at a deterministic storage
+ *      slot, avoiding collisions with DiamondStorage.
+ *
+ *      STORAGE CONVENTIONS:
+ *      - Treasury balances are stored in each token's native decimals (USDC=6, DAI=18)
+ *      - Use `normalizedTreasuryTotal()` for cross-asset comparisons (normalizes to 6 decimals)
+ *      - Role mutations emit indexed events for off-chain indexing
+ *      - The `initialized` flag ensures the Diamond can only be initialized once
  */
 library LibAppStorage {
     // ============ Storage Position ============
     bytes32 constant APP_STORAGE_POSITION = keccak256("2bottles.app.storage");
 
     // ============ Constants ============
-    uint256 constant BASIS_POINTS = 10000; // For percentage calculations (100% = 10000)
+    uint256 constant BASIS_POINTS = 10000;
     uint256 constant SECONDS_PER_DAY = 86400;
-    uint256 constant BLOCKS_PER_DAY = 7200; // Assuming ~12 sec blocks
+    uint256 constant BLOCKS_PER_DAY = 7200;
+    uint256 constant DECIMAL_NORMALIZATION = 1e12; // DAI(18) -> USDC(6) precision
 
     // ============ Role Constants ============
     bytes32 constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -28,21 +30,20 @@ library LibAppStorage {
     bytes32 constant VENUE_MANAGER_ROLE = keccak256("VENUE_MANAGER_ROLE");
     bytes32 constant TREASURY_MANAGER_ROLE = keccak256("TREASURY_MANAGER_ROLE");
 
+    // ============ Events ============
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+
     // ============ Structs ============
 
-    /**
-     * @dev Information about a user's stake
-     */
     struct StakeInfo {
         uint256 amount;
         uint256 stakedAt;
         uint256 proofMinted;
         uint256 lastRewardUpdate;
+        uint256 accumulatedRewards; // Total APY rewards claimed
     }
 
-    /**
-     * @dev Information about a user's rewards
-     */
     struct RewardInfo {
         uint256 totalEarned;
         uint256 lastCheckIn;
@@ -50,9 +51,6 @@ library LibAppStorage {
         uint256 referralCount;
     }
 
-    /**
-     * @dev Information about a venue
-     */
     struct VenueInfo {
         bool isActive;
         uint256 multiplier;
@@ -60,9 +58,6 @@ library LibAppStorage {
         uint256 rewardsDistributed;
     }
 
-    /**
-     * @dev Information about a governance proposal
-     */
     struct Proposal {
         address proposer;
         string description;
@@ -72,28 +67,23 @@ library LibAppStorage {
         uint256 endBlock;
         bool executed;
         bool canceled;
+        uint256 snapshotBlock;   // Block at which vote weights are snapshotted
+        address[] targets;        // Execution: target contract addresses
+        uint256[] values;         // Execution: ETH values per call
+        bytes[] calldatas;        // Execution: calldata per call
     }
 
-    /**
-     * @dev Tracks voting on a proposal
-     */
     struct Receipt {
         bool hasVoted;
         bool support;
         uint256 votes;
     }
 
-    /**
-     * @dev Checkpoint for vote delegation
-     */
     struct Checkpoint {
         uint32 fromBlock;
         uint256 votes;
     }
 
-    /**
-     * @dev The main application storage struct
-     */
     struct AppStorage {
         // ============ 2BTL Token State ============
         string btlName;
@@ -102,7 +92,7 @@ library LibAppStorage {
         uint256 btlTotalSupply;
         mapping(address => uint256) btlBalances;
         mapping(address => mapping(address => uint256)) btlAllowances;
-        uint256 btlTransferFee; // Basis points (50 = 0.5%)
+        uint256 btlTransferFee;
 
         // ============ PROOF Token State ============
         string proofName;
@@ -115,9 +105,10 @@ library LibAppStorage {
         // ============ Staking State ============
         mapping(address => StakeInfo) stakes;
         uint256 totalStaked;
-        uint256 stakingAPY; // Basis points (1000 = 10%)
+        uint256 stakingAPY;
         uint256 unstakeCooldown;
         mapping(address => uint256) unstakeRequestTime;
+        mapping(address => uint256) unstakeRequestAmount; // Locked unstake amount per user
 
         // ============ Rewards State ============
         mapping(address => RewardInfo) rewardInfo;
@@ -127,10 +118,11 @@ library LibAppStorage {
         uint256 maxCheckInsPerDay;
         mapping(address => VenueInfo) venues;
         address[] venueList;
+        mapping(address => mapping(address => bool)) referralClaimed; // referrer => referee => claimed
 
         // ============ Treasury State ============
-        uint256 treasuryUSDC;
-        uint256 treasuryDAI;
+        uint256 treasuryUSDC;  // Stored in USDC native decimals (6)
+        uint256 treasuryDAI;   // Stored in DAI native decimals (18)
         uint256 minCollateralRatio;
         uint256 targetCollateralRatio;
         address usdcAddress;
@@ -169,13 +161,18 @@ library LibAppStorage {
         uint256 totalRewardsDistributed;
         uint256 totalProofMinted;
         uint256 totalProofRedeemed;
+
+        // ============ Initialization Guard ============
+        bool initialized;
+
+        // ============ External Integrations ============
+        address dexRouter;     // DEX router for treasury buybacks
+        address btlWrapper;    // ERC20 wrapper contract for BTL
+        address proofWrapper;  // ERC20 wrapper contract for PROOF
     }
 
     // ============ Storage Access ============
 
-    /**
-     * @notice Get the app storage struct
-     */
     function appStorage() internal pure returns (AppStorage storage s) {
         bytes32 position = APP_STORAGE_POSITION;
         assembly {
@@ -183,16 +180,14 @@ library LibAppStorage {
         }
     }
 
-    // ============ Role Modifiers ============
+    // ============ Access Control ============
 
     function enforceIsAdmin() internal view {
-        AppStorage storage s = appStorage();
-        require(s.roles[ADMIN_ROLE][msg.sender], "LibAppStorage: Must be admin");
+        require(appStorage().roles[ADMIN_ROLE][msg.sender], "LibAppStorage: Must be admin");
     }
 
     function enforceIsOracle() internal view {
-        AppStorage storage s = appStorage();
-        require(s.roles[ORACLE_ROLE][msg.sender], "LibAppStorage: Must be oracle");
+        require(appStorage().roles[ORACLE_ROLE][msg.sender], "LibAppStorage: Must be oracle");
     }
 
     function enforceNotPaused() internal view {
@@ -205,9 +200,23 @@ library LibAppStorage {
 
     function grantRole(bytes32 role, address account) internal {
         appStorage().roles[role][account] = true;
+        emit RoleGranted(role, account, msg.sender);
     }
 
     function revokeRole(bytes32 role, address account) internal {
         appStorage().roles[role][account] = false;
+        emit RoleRevoked(role, account, msg.sender);
+    }
+
+    // ============ Treasury Helpers ============
+
+    /**
+     * @notice Get total treasury value normalized to USDC decimals (6)
+     * @dev DAI (18 decimals) is divided by 1e12 to match USDC (6 decimals)
+     */
+    function normalizedTreasuryTotal() internal view returns (uint256) {
+        AppStorage storage s = appStorage();
+        uint256 normalizedDAI = s.treasuryDAI / DECIMAL_NORMALIZATION;
+        return s.treasuryUSDC + normalizedDAI;
     }
 }

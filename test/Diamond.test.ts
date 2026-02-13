@@ -45,6 +45,8 @@ describe("2bottles Diamond", async function () {
     let governanceFacet: GovernanceFacet;
     let treasuryFacet: TreasuryFacet;
     let diamondInit: DiamondInit;
+    let mockUSDC: any;
+    let mockDAI: any;
 
     let owner: Signer;
     let oracle: Signer;
@@ -111,6 +113,13 @@ describe("2bottles Diamond", async function () {
         diamondInit = await DiamondInit.deploy();
         await diamondInit.waitForDeployment();
 
+        // Deploy Mock Stablecoins
+        const MockERC20 = await ethers.getContractFactory("MockERC20");
+        mockUSDC = await MockERC20.deploy("USD Coin", "USDC", 6);
+        await mockUSDC.waitForDeployment();
+        mockDAI = await MockERC20.deploy("Dai Stablecoin", "DAI", 18);
+        await mockDAI.waitForDeployment();
+
         // Build facet cuts
         const facetCuts = [
             {
@@ -165,8 +174,8 @@ describe("2bottles Diamond", async function () {
             initialBTLSupply: ethers.parseEther("1000000000"),
             initialTokenHolder: await owner.getAddress(),
             initialTreasuryUSDC: ethers.parseUnits("1000000", 6),
-            usdcAddress: "0x0000000000000000000000000000000000000001",
-            daiAddress: "0x0000000000000000000000000000000000000002",
+            usdcAddress: await mockUSDC.getAddress(),
+            daiAddress: await mockDAI.getAddress(),
             admin: await owner.getAddress(),
             oracle: await oracle.getAddress(),
             venueManager: await venueManager.getAddress(),
@@ -185,6 +194,9 @@ describe("2bottles Diamond", async function () {
         );
         await diamond.waitForDeployment();
         diamondAddress = await diamond.getAddress();
+
+        // Fund diamond with mock USDC to match initial treasury accounting
+        await mockUSDC.mint(diamondAddress, ethers.parseUnits("1000000", 6));
     });
 
     describe("Diamond Setup", function () {
@@ -369,7 +381,12 @@ describe("2bottles Diamond", async function () {
     describe("Governance", function () {
         it("should allow proposal creation with enough BTL", async function () {
             // Owner has plenty of BTL
-            await asGovernance().connect(owner).propose("Test proposal: Increase rewards by 10%");
+            await asGovernance().connect(owner).propose(
+                "Test proposal: Increase rewards by 10%",
+                [], // no execution targets (signal proposal)
+                [],
+                []
+            );
 
             const proposalCount = await asGovernance().getProposalCount();
             expect(proposalCount).to.equal(1);
@@ -406,6 +423,10 @@ describe("2bottles Diamond", async function () {
         it("should allow treasury manager to deposit", async function () {
             const depositAmount = ethers.parseUnits("100", 6);
             const initialBalance = (await asTreasury().getTreasuryBalances()).usdcBalance;
+
+            // Mint mock USDC to treasury manager and approve diamond
+            await mockUSDC.mint(await treasuryManager.getAddress(), depositAmount);
+            await mockUSDC.connect(treasuryManager).approve(diamondAddress, depositAmount);
 
             await asTreasury().connect(treasuryManager).depositUSDC(depositAmount);
 
@@ -462,6 +483,116 @@ describe("2bottles Diamond", async function () {
             await expect(
                 asBTL().connect(owner).btlTransfer(await user1.getAddress(), ethers.parseEther("100"))
             ).to.not.be.revert(ethers);
+        });
+    });
+
+    describe("Security: Initialization Guard", function () {
+        it("should reject re-initialization", async function () {
+            // Try calling init again through a diamond cut
+            const initArgs = {
+                initialBTLSupply: ethers.parseEther("999"),
+                initialTokenHolder: await user1.getAddress(),
+                initialTreasuryUSDC: 0,
+                usdcAddress: await mockUSDC.getAddress(),
+                daiAddress: await mockDAI.getAddress(),
+                admin: await user1.getAddress(),
+                oracle: await user1.getAddress(),
+                venueManager: await user1.getAddress(),
+                treasuryManager: await user1.getAddress(),
+            };
+            const initCalldata = diamondInit.interface.encodeFunctionData("init", [initArgs]);
+            const diamondCut = diamondCutFacet.attach(diamondAddress) as DiamondCutFacet;
+
+            await expect(
+                diamondCut.connect(owner).diamondCut(
+                    [],
+                    await diamondInit.getAddress(),
+                    initCalldata
+                )
+            ).to.be.revertedWith("DiamondInit: Already initialized");
+        });
+    });
+
+    describe("Security: Admin Self-Revoke Protection", function () {
+        it("should prevent admin from revoking their own admin role", async function () {
+            const ADMIN_ROLE = ethers.keccak256(ethers.toUtf8Bytes("ADMIN_ROLE"));
+            await expect(
+                asTreasury().connect(owner).revokeRole(ADMIN_ROLE, await owner.getAddress())
+            ).to.be.revertedWith("Treasury: Cannot revoke own admin role");
+        });
+    });
+
+    describe("Security: Referral Deduplication", function () {
+        it("should prevent duplicate referral claims", async function () {
+            // First claim should succeed
+            await asRewards().connect(oracle).claimReferralReward(
+                await user1.getAddress(), // referrer
+                await user2.getAddress()  // referee
+            );
+
+            // Second claim with same pair should fail
+            await expect(
+                asRewards().connect(oracle).claimReferralReward(
+                    await user1.getAddress(),
+                    await user2.getAddress()
+                )
+            ).to.be.revertedWith("Rewards: Referral already claimed");
+        });
+    });
+
+    describe("Security: Unstake Amount Locking", function () {
+        it("should lock the specific unstake amount", async function () {
+            const stakeInfo = await asStaking().getStakeInfo(await user1.getAddress());
+            const stakedAmount = stakeInfo[0];
+
+            if (stakedAmount > 0n) {
+                const unstakeAmount = stakedAmount / 2n;
+                await asStaking().connect(user1).requestUnstake(unstakeAmount);
+
+                const canUnstakeResult = await asStaking().canUnstake(await user1.getAddress());
+                expect(canUnstakeResult[2]).to.equal(unstakeAmount); // requestedAmount
+            }
+        });
+    });
+
+    describe("Security: Deposit Access Control", function () {
+        it("should reject deposits from unauthorized users", async function () {
+            const depositAmount = ethers.parseUnits("100", 6);
+            await mockUSDC.mint(await user1.getAddress(), depositAmount);
+            await mockUSDC.connect(user1).approve(diamondAddress, depositAmount);
+
+            await expect(
+                asTreasury().connect(user1).depositUSDC(depositAmount)
+            ).to.be.revertedWith("Treasury: Not authorized to deposit");
+        });
+    });
+
+    describe("Security: Snapshot Voting", function () {
+        it("should use snapshot-based voting power", async function () {
+            // Create a proposal
+            await asGovernance().connect(owner).propose(
+                "Snapshot test proposal",
+                [], [], []
+            );
+
+            const proposalCount = await asGovernance().getProposalCount();
+            const proposalId = proposalCount - 1n;
+
+            // Get proposal details to check snapshotBlock
+            const proposal = await asGovernance().getProposal(proposalId);
+            expect(proposal.snapshotBlock).to.be.gt(0);
+
+            // Mine blocks to pass voting delay
+            const params = await asGovernance().getGovernanceParams();
+            for (let i = 0; i < Number(params.votingDelay) + 1; i++) {
+                await ethers.provider.send("evm_mine", []);
+            }
+
+            // Owner should be able to vote with snapshot voting power
+            await asGovernance().connect(owner).castVote(proposalId, true);
+            const receipt = await asGovernance().getReceipt(proposalId, await owner.getAddress());
+            expect(receipt.hasVoted).to.equal(true);
+            expect(receipt.votes).to.be.gt(0);
         });
     });
 });
